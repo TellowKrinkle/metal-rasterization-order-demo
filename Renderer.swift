@@ -24,14 +24,18 @@ extension MTLRenderCommandEncoder {
 class Renderer : NSObject, MTKViewDelegate {
 	struct Config {
 		var live: Bool
+		var flip: Bool
 		var drawTime: Float
 		var testSize: (x: Int, y: Int)
 		var tests: [Test]
 
 		static var fromEnv: Config {
-			var config = Renderer.Config(live: false, drawTime: 20, testSize: (x: 1920, y: 1080), tests: [.fsTriangle, .fsQuadStrip])
+			var config = Renderer.Config(live: false, flip: false, drawTime: 20, testSize: (x: 1920, y: 1080), tests: [.fsTriangle, .fsQuadStrip])
 			if let env = getenv("LIVE"), env[0] == UInt8(ascii: "1") || env[0] == UInt8(ascii: "y") || env[0] == UInt8(ascii: "Y") {
 				config.live = true
+			}
+			if let env = getenv("FLIP"), env[0] == UInt8(ascii: "1") || env[0] == UInt8(ascii: "y") || env[0] == UInt8(ascii: "Y") {
+				config.flip = true
 			}
 			if let env = getenv("TIME"), let time = .some(atof(env)), time > 0 {
 				config.drawTime = Float(time)
@@ -134,17 +138,18 @@ class Renderer : NSObject, MTKViewDelegate {
 			render.waitForFence(barrier0, before: .fragment)
 			render.setRenderPipelineState(recordPipe)
 			render.setFragmentBuffer(atomic, offset: 4 * idx, index: 0)
+			let flip: Float = config.flip ? -1 : 1
 			switch config.tests[idx] {
 			case .fsTriangle:
-				render.setVertexBytes([SIMD4<Float>(-1, 1, 0, 1), SIMD4<Float>(3, 1, 0, 1), SIMD4<Float>(-1, -3, 0, 1)], index: 0)
+				render.setVertexBytes([SIMD4<Float>(-1, flip, 0, 1), SIMD4<Float>(3, flip, 0, 1), SIMD4<Float>(-1, flip * -3, 0, 1)], index: 0)
 				render.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
 			case .fsQuadStrip:
-				render.setVertexBytes([SIMD4<Float>(-1, 1, 0, 1), SIMD4<Float>(1, 1, 0, 1), SIMD4<Float>(-1, -1, 0, 1), SIMD4<Float>(1, -1, 0, 1)], index: 0)
+				render.setVertexBytes([SIMD4<Float>(-1, flip, 0, 1), SIMD4<Float>(1, flip, 0, 1), SIMD4<Float>(-1, -flip, 0, 1), SIMD4<Float>(1, -flip, 0, 1)], index: 0)
 				render.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
 			case .fsQuadTwoDraws:
-				render.setVertexBytes([SIMD4<Float>(-1, 1, 0, 1), SIMD4<Float>(1, 1, 0, 1), SIMD4<Float>(-1, -1, 0, 1)], index: 0)
+				render.setVertexBytes([SIMD4<Float>(-1, flip, 0, 1), SIMD4<Float>(1, flip, 0, 1), SIMD4<Float>(-1, -flip, 0, 1)], index: 0)
 				render.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-				render.setVertexBytes([SIMD4<Float>(1, 1, 0, 1), SIMD4<Float>(-1, -1, 0, 1), SIMD4<Float>(1, -1, 0, 1)], index: 0)
+				render.setVertexBytes([SIMD4<Float>(1, flip, 0, 1), SIMD4<Float>(-1, -flip, 0, 1), SIMD4<Float>(1, -flip, 0, 1)], index: 0)
 				render.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
 			}
 			render.updateFence(barrier1, after: .fragment)
