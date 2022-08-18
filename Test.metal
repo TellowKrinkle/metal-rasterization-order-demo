@@ -26,7 +26,7 @@ fragment half4 fs_stretch(V2F in [[stage_in]], texture2d<half> tex [[texture(0)]
 	return tex.sample(s, in.tex);
 }
 
-fragment float4 fs_record(device atomic_uint& atomic) {
+fragment float4 fs_record(device atomic_uint& atomic [[buffer(0)]]) {
 	uint me = atomic_fetch_add_explicit(&atomic, 1, memory_order_relaxed);
 	return float4(as_type<uchar4>(me)) / 255.f;
 }
@@ -35,7 +35,7 @@ struct DepthOut {
 	float depth [[depth(any)]];
 };
 
-fragment DepthOut fs_record_depth(device atomic_uint& atomic) {
+fragment DepthOut fs_record_depth(device atomic_uint& atomic [[buffer(0)]]) {
 	uint me = atomic_fetch_add_explicit(&atomic, 1, memory_order_relaxed);
 	return {float(me) * 0x1p-32f};
 }
