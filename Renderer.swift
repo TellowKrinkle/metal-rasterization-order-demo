@@ -25,17 +25,21 @@ class Renderer : NSObject, MTKViewDelegate {
 	struct Config {
 		var live: Bool
 		var flip: Bool
+		var depth: Bool
 		var drawTime: Float
 		var testSize: (x: Int, y: Int)
 		var tests: [Test]
 
 		static var fromEnv: Config {
-			var config = Renderer.Config(live: false, flip: false, drawTime: 20, testSize: (x: 1920, y: 1080), tests: [.fsTriangle, .fsQuadStrip])
+			var config = Renderer.Config(live: false, flip: false, depth: false, drawTime: 20, testSize: (x: 1920, y: 1080), tests: [.fsTriangle, .fsQuadStrip])
 			if let env = getenv("LIVE"), env[0] == UInt8(ascii: "1") || env[0] == UInt8(ascii: "y") || env[0] == UInt8(ascii: "Y") {
 				config.live = true
 			}
 			if let env = getenv("FLIP"), env[0] == UInt8(ascii: "1") || env[0] == UInt8(ascii: "y") || env[0] == UInt8(ascii: "Y") {
 				config.flip = true
+			}
+			if let env = getenv("DEPTH"), env[0] == UInt8(ascii: "1") || env[0] == UInt8(ascii: "y") || env[0] == UInt8(ascii: "Y") {
+				config.depth = true
 			}
 			if let env = getenv("TIME"), let time = .some(atof(env)), time > 0 {
 				config.drawTime = Float(time)
@@ -79,7 +83,9 @@ class Renderer : NSObject, MTKViewDelegate {
 	let replayPipe: MTLRenderPipelineState
 	let outputPipe: MTLRenderPipelineState
 	let queue: MTLCommandQueue
-	let rpdesc: MTLRenderPassDescriptor
+	let recordRPDesc: MTLRenderPassDescriptor
+	let replayRPDesc: MTLRenderPassDescriptor
+	let dss: MTLDepthStencilState
 	let startTime: Date
 
 	init(_ gpu: MTLDevice, config: Config, drawableFmt: MTLPixelFormat) {
@@ -88,9 +94,25 @@ class Renderer : NSObject, MTKViewDelegate {
 		barrier0 = gpu.makeFence()!
 		barrier1 = gpu.makeFence()!
 		queue = gpu.makeCommandQueue()!
-		rpdesc = MTLRenderPassDescriptor()
-		rpdesc.colorAttachments[0].loadAction = .dontCare
-		rpdesc.colorAttachments[0].storeAction = .store
+		recordRPDesc = MTLRenderPassDescriptor()
+		if config.depth {
+			recordRPDesc.depthAttachment.loadAction = .clear
+			recordRPDesc.depthAttachment.clearDepth = 0x1p-32 // In case there's any special cases for 0 depth
+			recordRPDesc.depthAttachment.storeAction = .store
+		} else {
+			recordRPDesc.colorAttachments[0].loadAction = .clear
+			recordRPDesc.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+			recordRPDesc.colorAttachments[0].storeAction = .store
+		}
+		replayRPDesc = MTLRenderPassDescriptor()
+		replayRPDesc.colorAttachments[0].loadAction = .clear
+		replayRPDesc.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+		replayRPDesc.colorAttachments[0].storeAction = .store
+
+		let dssdesc = MTLDepthStencilDescriptor()
+		dssdesc.depthCompareFunction = .greater
+		dssdesc.isDepthWriteEnabled = true
+		dss = gpu.makeDepthStencilState(descriptor: dssdesc)!
 
 		let tdesc = MTLTextureDescriptor.texture2DDescriptor(
 			pixelFormat: .rgba8Unorm,
@@ -100,18 +122,27 @@ class Renderer : NSObject, MTKViewDelegate {
 		)
 		tdesc.usage = [.renderTarget, .shaderRead]
 		tdesc.storageMode = .private
-		recordTextures = config.tests.map { _ in gpu.makeTexture(descriptor: tdesc)! }
 		replayTextures = config.tests.map { _ in gpu.makeTexture(descriptor: tdesc)! }
+		if (config.depth) { tdesc.pixelFormat = .depth32Float }
+		recordTextures = config.tests.map { _ in gpu.makeTexture(descriptor: tdesc)! }
 		atomic = gpu.makeBuffer(length: 4 * config.tests.count, options: [.storageModePrivate, .hazardTrackingModeUntracked])!
 
 		let lib = gpu.makeDefaultLibrary()!
 		let rpdesc = MTLRenderPipelineDescriptor()
-		rpdesc.colorAttachments[0].pixelFormat = .rgba8Unorm
 		rpdesc.vertexFunction = lib.makeFunction(name: "vs")!
-		rpdesc.fragmentFunction = lib.makeFunction(name: "fs_record")!
+		if config.depth {
+			rpdesc.colorAttachments[0].pixelFormat = .invalid
+			rpdesc.depthAttachmentPixelFormat = .depth32Float
+			rpdesc.fragmentFunction = lib.makeFunction(name: "fs_record_depth")!
+		} else {
+			rpdesc.colorAttachments[0].pixelFormat = .rgba8Unorm
+			rpdesc.fragmentFunction = lib.makeFunction(name: "fs_record")!
+		}
 		recordPipe = try! gpu.makeRenderPipelineState(descriptor: rpdesc)
+		rpdesc.colorAttachments[0].pixelFormat = .rgba8Unorm
+		rpdesc.depthAttachmentPixelFormat = .invalid
 		rpdesc.vertexFunction = lib.makeFunction(name: "vs_fullscreen")!
-		rpdesc.fragmentFunction = lib.makeFunction(name: "fs_replay")!
+		rpdesc.fragmentFunction = lib.makeFunction(name: config.depth ? "fs_replay_depth" : "fs_replay")!
 		replayPipe = try! gpu.makeRenderPipelineState(descriptor: rpdesc)
 		rpdesc.colorAttachments[0].pixelFormat = drawableFmt
 		rpdesc.vertexFunction = lib.makeFunction(name: "vs_stretch")!
@@ -133,8 +164,15 @@ class Renderer : NSObject, MTKViewDelegate {
 		clear.updateFence(barrier0)
 		clear.endEncoding()
 		for idx in 0..<config.tests.count {
-			rpdesc.colorAttachments[0].texture = recordTextures[idx]
-			let render = cb.makeRenderCommandEncoder(descriptor: rpdesc)!
+			if config.depth {
+				recordRPDesc.depthAttachment.texture = recordTextures[idx]
+			} else {
+				recordRPDesc.colorAttachments[0].texture = recordTextures[idx]
+			}
+			let render = cb.makeRenderCommandEncoder(descriptor: recordRPDesc)!
+			if config.depth {
+				render.setDepthStencilState(dss)
+			}
 			render.waitForFence(barrier0, before: .fragment)
 			render.setRenderPipelineState(recordPipe)
 			render.setFragmentBuffer(atomic, offset: 4 * idx, index: 0)
@@ -159,8 +197,8 @@ class Renderer : NSObject, MTKViewDelegate {
 
 	func replay(_ cb: MTLCommandBuffer, threshold: UInt32) {
 		for (record, replay) in zip(recordTextures, replayTextures) {
-			rpdesc.colorAttachments[0].texture = replay
-			let render = cb.makeRenderCommandEncoder(descriptor: rpdesc)!
+			replayRPDesc.colorAttachments[0].texture = replay
+			let render = cb.makeRenderCommandEncoder(descriptor: replayRPDesc)!
 			render.setRenderPipelineState(replayPipe)
 			withUnsafeBytes(of: threshold) { render.setFragmentBytes($0.baseAddress!, length: $0.count, index: 0) }
 			render.setFragmentTexture(record, index: 0)
