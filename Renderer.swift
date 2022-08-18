@@ -182,7 +182,7 @@ class Renderer : NSObject, MTKViewDelegate {
 				let x0 = Float(idx) * step - 1
 				let x1 = Float(idx + 1) * step - 1
 				render.setFragmentTexture(replay, index: 0)
-				render.setVertexBytes([SIMD4<Float>(x0, 1, 0, 0), SIMD4<Float>(x1, 1, 0, 1), SIMD4<Float>(x0, -1, 1, 0), SIMD4<Float>(x1, -1, 1, 1)], index: 0)
+				render.setVertexBytes([SIMD4<Float>(x0, 1, 0, 0), SIMD4<Float>(x1, 1, 1, 0), SIMD4<Float>(x0, -1, 0, 1), SIMD4<Float>(x1, -1, 1, 1)], index: 0)
 				render.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
 			}
 			render.endEncoding()
